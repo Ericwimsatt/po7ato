@@ -1,0 +1,1 @@
+{"version":3,"file":"tool.js","sourceRoot":"","sources":["../../src/tools/tool.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,MAAM,EAAE,MAAM,QAAQ,CAAC;AAEhC,MAAM,IAAI;IACa,IAAI;IAAiB,WAAW;IAAiB,OAAO;IAA3E,YAAmB,IAAY,EAAS,WAAmB,EAAS,OAA0D;oBAA3G,IAAI;2BAAiB,WAAW;uBAAiB,OAAO;IAC3E,CAAC;CACJ;AAED,OAAO,EAAE,IAAI,EAAE,CAAA"}
