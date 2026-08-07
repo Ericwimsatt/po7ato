@@ -1,14 +1,21 @@
-/*THIS IS A SERVER THAT CONNECTS TO THE END USER. A user interface will touch this directly, and this server will in turn be responsible 
-everything else 
-    */
-import { eventBus } from './orchestrator/eventBus/EventBus.js'
-import type { PublisherId } from './publisherId.js';
+import { eventBus } from "./orchestrator/eventBus/EventBus.js"
+import type { AgentMode } from "./orchestrator/eventBus/EventBus.js"
+import type { PublisherId } from "./publisherId.js"
 
-const requestAgent = (params: { prompt: string, mode: "build" | "plan" | "ask", workspace?: string }, publisherId: PublisherId) => {
-    return eventBus.publish(
-        { kind: "AgentSessionRequested", params },
-        publisherId
-    )
-}
+export const requestAgent = (
+  params: { prompt: string; mode: AgentMode; workspace?: string },
+  publisherId: PublisherId
+) => eventBus.publish(
+  { kind: "SessionCreateRequested", params },
+  publisherId
+)
 
-export { requestAgent }
+export const submitUserInput = (
+  sessionId: import("./sessionId.js").SessionId,
+  text: string,
+  publisherId: PublisherId
+) => eventBus.publish(
+  { kind: "UserInputReceived", params: { text } },
+  publisherId,
+  { sessionId }
+)

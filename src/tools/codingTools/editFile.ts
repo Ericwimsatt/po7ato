@@ -1,14 +1,13 @@
-import { Tool } from "../tool";
+import { Effect } from "effect"
+import { Tool } from "../tool.js"
 
-const editFile = (params: { filePath: string}, publisherId: string) => {
-    // edit the file at filePath
-    // Copy implementation details from OpenCode for now
-}
-
-const editFileTool = new Tool(
-    "edit-file",
-    "Edit a file in the project",
-    editFile
+export const editFileTool = new Tool(
+  "edit-file",
+  "Edit a file in the project",
+  (params, context) => Effect.succeed({
+    status: "stub",
+    message: "File editing is not implemented yet.",
+    params,
+    sessionId: context.sessionId
+  })
 )
-
-export { editFileTool }

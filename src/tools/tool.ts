@@ -1,8 +1,22 @@
-import { Effect } from "effect";
+import type { Effect } from "effect"
+import type { SessionBus } from "../orchestrator/eventBus/EventBus.js"
+import type { PublisherId } from "../publisherId.js"
+import type { SessionId } from "../sessionId.js"
 
-class Tool {
-    constructor(public name: string, public description: string, public execute: (params: any, publisherId: string) => Effect.Effect<any>) {
-    }
+export type ToolContext = {
+  sessionId: SessionId
+  requestId: string
+  publisherId: PublisherId
+  bus: SessionBus
 }
 
-export { Tool }
+export class Tool {
+  constructor(
+    public readonly name: string,
+    public readonly description: string,
+    public readonly execute: (
+      params: unknown,
+      context: ToolContext
+    ) => Effect<unknown, unknown, never>
+  ) {}
+}

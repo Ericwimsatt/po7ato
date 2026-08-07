@@ -1,35 +1,35 @@
-import { Stream, Effect, Chunk, PubSub } from "effect"
-import { generateSessionId, type SessionId } from "./sessionId.js";
-import modelSelector from "./modelSelector.js";
-import { Agent } from "./agent.js";
-import type { PublisherId } from "./publisherId.js";
+import { Effect } from "effect"
+import { Agent } from "./agent.js"
+import { SessionBus } from "./orchestrator/eventBus/EventBus.js"
+import { eventBus } from "./orchestrator/eventBus/EventBus.js"
+import type { PublisherId } from "./publisherId.js"
+import { generateSessionId, type SessionId } from "./sessionId.js"
 
-/* Session that can be consumed by an end user */
+/** The runtime and event boundary for one end-user session. */
 export class Session {
-    public sessionId: SessionId
-    private fullOutput: string = ""
-    private outputStream?: Stream.Stream<string>
-    private agent: any
-    private model: any
-    private subAgents: any[] = []
+  public readonly sessionId: SessionId = generateSessionId()
+  public readonly bus = new SessionBus(this.sessionId, eventBus)
+  private readonly agent: Agent
 
-    private PubSub?: PubSub.PubSub<BusEvent>
+  constructor(
+    private readonly workspaceRoot: string,
+    private readonly creator: PublisherId
+  ) {
+    this.agent = new Agent(this.sessionId, creator, workspaceRoot, this.bus)
+  }
 
-    constructor(private workspace_root: string, private creator: PublisherId) {
-        this.sessionId = generateSessionId()
-    }
+  init(): void {
+    Effect.runFork(
+      this.bus.subscribe("UserInputReceived", event => {
+        Effect.runFork(this.agent.handleInput(event.params.text, event))
+      })
+    )
+  }
 
-    init() {
-        this.createAgent()
-        this.outputStream = Stream.async<string>((emit) => {
-            this.fullOutput += "llm output"
-            emit(Effect.succeed(Chunk.of("llm output")))
-        })
-    }
-
-    createAgent() {
-        this.model = modelSelector() // Based on user preferences, what's subscribed
-        const agent = new Agent(this.sessionId, this.creator ?? 'User', this.workspace_root)
-        this.agent = agent  
-    }
+  close(reason: string): Effect.Effect<void> {
+    return this.bus.publish(
+      { kind: "SessionClosed", params: { reason } },
+      this.creator
+    ).pipe(Effect.asVoid)
+  }
 }
