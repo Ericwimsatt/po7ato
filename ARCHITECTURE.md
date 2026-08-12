@@ -4,6 +4,8 @@ Po7ato is an event-recorded agent runtime. Components communicate by publishing 
 
 The event stream is the canonical record of accepted runtime activity. Pub/sub is the delivery mechanism over that record. This keeps activity observable, replayable, and available to multiple consumers such as sessions, tools, interfaces, logs, and debugging projections.
 
+The current architecture is primarily a map for developers who need to understand and replace chunks of the implementation. Components may have explicit boundaries and interfaces, but those boundaries do not imply that the running system can hot-swap implementations. In a future refactor, these seams may support selecting or replacing chunks of functionality through an interface at runtime; that is a possible direction, not a current requirement.
+
 ## Core boundaries
 
 ```text
@@ -181,7 +183,7 @@ The first implementation can remain simple and in-process:
 6. Make tools publish completion or failure events instead of directly calling back into the agent.
 7. Add persistence and replay behind the core bus without changing session subscribers.
 
-This preserves replaceable boundaries while avoiding premature runtime configurability. The important invariant is that there is one canonical event stream and that all derived delivery paths can be reconstructed from it.
+This preserves replaceable boundaries while avoiding premature runtime configurability. For now, a coder should be able to rip out and replace a bounded chunk of the code, wire the replacement into the composition, and use the event stream to understand the result. The boundaries should leave room for a future refactor in which implementations can be selected or hot-swapped through an interface, but the initial implementation does not need to provide that runtime behavior. The important invariant is that there is one canonical event stream and that all derived delivery paths can be reconstructed from it.
 
 ## Open decisions
 
@@ -196,4 +198,3 @@ The following remain intentionally unresolved:
 - cancellation and shutdown guarantees
 - workspace and repository isolation
 - model-provider and adapter contracts
-
