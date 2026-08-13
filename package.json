@@ -11,14 +11,14 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "start": "tsx --env-file-if-exists=.env src/index.ts",
     "test:run": "vitest --run",
     "build": "tsup src/index.ts --format esm --out-dir dist",
     "typecheck": "npx effect-tsgo diagnostics --project tsconfig.json --format pretty",
     "test": "vitest",
     "verify": "npm run test:run && npm run typecheck && npm run build",
-    "manual": "npm run build && node dist/index.js",
+    "manual": "npm run build && node --env-file-if-exists=.env dist/index.js",
     "prepare": "npx @effect/tsgo patch && chmod +x node_modules/@effect/tsgo-*/lib/tsc*"
   },
   "dependencies": {

@@ -16,12 +16,15 @@ export type EventMap = {
     mode: AgentMode
     workspace?: string
   }
-  SessionCreated: { requester: PublisherId }
+  SessionCreateSuccessful: { sessionId: SessionId }
+  SessionStarted: { sessionId: SessionId }
+  SessionFinished: { sessionId: SessionId; reason: "closed"; error?: string }
   SessionClosed: { reason: string }
   UserInputReceived: { text: string }
   AgentTurnStarted: { turnId: string }
   AgentOutputDelta: { turnId: string; text: string }
   AgentTurnFinished: { turnId: string }
+  AgentTurnFailed: { turnId: string; error: string }
   ToolRequested: {
     requestId: string
     turnId: string
@@ -91,6 +94,12 @@ export class EventBus {
     )
   }
 
+  subscribeAll(handler: (event: AnyEvent) => void): Effect.Effect<void> {
+    return Stream.fromPubSub(this.pubsub).pipe(
+      Stream.runForEach(event => Effect.sync(() => handler(event)))
+    )
+  }
+
   subscribeToSession(
     sessionId: SessionId,
     handler: (event: AnyEvent) => void
@@ -128,6 +137,10 @@ export class EventBus {
       )
     )
   }
+
+  publishAny(event: AnyEvent): Effect.Effect<void> {
+    return PubSub.publish(this.pubsub, event).pipe(Effect.asVoid)
+  }
 }
 
 export class SessionBus {
@@ -143,6 +156,10 @@ export class SessionBus {
     return this.coreBus.subscribe(kind, event => {
       if (event.sessionId === this.sessionId) handler(event)
     })
+  }
+
+  subscribeAll(handler: (event: AnyEvent) => void): Effect.Effect<void> {
+    return this.coreBus.subscribeToSession(this.sessionId, handler)
   }
 
   publish<K extends EventKey>(

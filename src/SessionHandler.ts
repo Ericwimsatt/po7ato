@@ -3,6 +3,7 @@ import { Session } from "./Session.js"
 import { eventBus } from "./orchestrator/eventBus/EventBus.js"
 import type { PublisherId } from "./publisherId.js"
 import type { SessionId } from "./sessionId.js"
+import { createOpenRouterModel } from "./llmAdapters/openRouter.js"
 
 /** Owns session lifecycle; the bus remains responsible for transport. */
 export class SessionManager {
@@ -13,34 +14,11 @@ export class SessionManager {
       eventBus.subscribe("SessionCreateRequested", event => {
         const session = this.createSession(event.params.workspace ?? "", event.publisherId)
 
-        Effect.runFork(
-          eventBus.publish(
-            {
-              kind: "SessionCreated",
-              params: { requester: event.publisherId }
-            },
-            event.publisherId,
-            {
-              sessionId: session.sessionId,
-              correlationId: event.correlationId,
-              causationId: event.id
-            }
-          ).pipe(
-            Effect.flatMap(created => eventBus.publish(
-              {
-                kind: "UserInputReceived",
-                params: { text: event.params.prompt }
-              },
-              event.publisherId,
-              {
-                sessionId: session.sessionId,
-                correlationId: event.correlationId,
-                causationId: created.id
-              }
-            )),
-            Effect.asVoid
-          )
-        )
+        Effect.runFork(eventBus.publish(
+          { kind: "SessionCreateSuccessful", params: { sessionId: session.sessionId } },
+          event.publisherId,
+          { correlationId: event.correlationId, causationId: event.id }
+        ))
       })
     )
     return this
@@ -57,7 +35,7 @@ export class SessionManager {
   }
 
   private createSession(workspaceRoot: string, creator: PublisherId): Session {
-    const session = new Session(workspaceRoot, creator)
+    const session = new Session(workspaceRoot, creator, createOpenRouterModel())
     session.init()
     this.sessions.set(session.sessionId, session)
     return session
