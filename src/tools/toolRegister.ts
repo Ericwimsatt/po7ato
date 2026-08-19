@@ -2,7 +2,11 @@ import { Effect } from "effect"
 import { eventBus, SessionBus } from "../orchestrator/eventBus/EventBus.js"
 import { editFileTool } from "./codingTools/editFile.js"
 import { requestUserInputTool } from "./codingTools/requestUserInput.js"
+import { readFileTool } from "./codingTools/readFile.js"
+import { searchWorkspaceTool } from "./codingTools/searchWorkspace.js"
 import { Tool } from "./tool.js"
+import type { ToolContext } from "./tool.js"
+import type { ToolRequest } from "../model.js"
 
 /** Resolves and executes tools in response to ToolRequested events. */
 export class ToolRegistry {
@@ -11,6 +15,8 @@ export class ToolRegistry {
   init(): this {
     this.register(editFileTool)
     this.register(requestUserInputTool)
+    this.register(readFileTool)
+    this.register(searchWorkspaceTool)
 
     Effect.runFork(
       eventBus.subscribe("ToolRequested", event => {
@@ -48,6 +54,7 @@ export class ToolRegistry {
         const context = {
           sessionId: event.sessionId,
           requestId: event.params.requestId,
+          workspaceRoot: process.cwd(),
           publisherId: event.publisherId,
           bus: sessionBus
         }
@@ -100,6 +107,15 @@ export class ToolRegistry {
 
   get(toolName: string): Tool | undefined {
     return this.tools.get(toolName)
+  }
+
+  execute(request: ToolRequest, context: ToolContext): Effect.Effect<unknown, unknown> {
+    const tool = this.tools.get(request.toolName)
+    if (tool === undefined) return Effect.fail(`Unknown tool: ${request.toolName}`)
+
+    const validationError = tool.validate(request.params)
+    if (validationError !== undefined) return Effect.fail(validationError)
+    return tool.execute(request.params, context)
   }
 }
 

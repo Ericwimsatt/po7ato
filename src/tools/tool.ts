@@ -6,9 +6,12 @@ import type { SessionId } from "../sessionId.js"
 export type ToolContext = {
   sessionId: SessionId
   requestId: string
+  workspaceRoot: string
   publisherId: PublisherId
   bus: SessionBus
 }
+
+export type ToolValidator = (params: unknown) => string | undefined
 
 export class Tool {
   constructor(
@@ -17,6 +20,7 @@ export class Tool {
     public readonly execute: (
       params: unknown,
       context: ToolContext
-    ) => Effect<unknown, unknown, never>
+    ) => Effect<unknown, unknown, never>,
+    public readonly validate: ToolValidator = () => undefined
   ) {}
 }

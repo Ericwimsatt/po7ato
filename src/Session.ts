@@ -6,6 +6,7 @@ import { SessionBus, type EventEnvelope } from "./orchestrator/eventBus/EventBus
 import { eventBus } from "./orchestrator/eventBus/EventBus.js"
 import type { PublisherId } from "./publisherId.js"
 import { generateSessionId, type SessionId } from "./sessionId.js"
+import { toolRegistry } from "./tools/toolRegister.js"
 
 /** The runtime and event boundary for one end-user session. */
 export class Session {
@@ -13,14 +14,36 @@ export class Session {
   public readonly bus = new SessionBus(this.sessionId, eventBus)
   private readonly agent: Agent
   private readonly history: ModelMessage[] = []
+  private activeTurnId = ""
 
   constructor(
     private readonly workspaceRoot: string,
     private readonly creator: PublisherId,
     model?: Model | AgentResponder
   ) {
-    void this.workspaceRoot
-    this.agent = new Agent(model)
+    this.agent = new Agent(model, request => {
+      const requestId = request.requestId
+      return toolRegistry.execute(request, {
+        sessionId: this.sessionId,
+        requestId,
+        workspaceRoot: this.workspaceRoot || process.cwd(),
+        publisherId: this.creator,
+        bus: this.bus
+      })
+    }, {
+      requested: request => this.bus.publish({
+        kind: "ToolRequested",
+        params: { requestId: request.requestId, turnId: this.activeTurnId, toolName: request.toolName, params: request.params }
+      }, this.creator).pipe(Effect.asVoid),
+      completed: (request, response) => this.bus.publish({
+        kind: "ToolExecutionCompleted",
+        params: { requestId: request.requestId, toolName: request.toolName, response }
+      }, this.creator).pipe(Effect.asVoid),
+      failed: (request, error) => this.bus.publish({
+        kind: "ToolExecutionFailed",
+        params: { requestId: request.requestId, toolName: request.toolName, error: String(error) }
+      }, this.creator).pipe(Effect.asVoid)
+    })
   }
 
   init(): void {
@@ -37,6 +60,7 @@ export class Session {
 
   private handleInput(text: string, inputEvent: EventEnvelope<"UserInputReceived">): Effect.Effect<void> {
     const turnId = crypto.randomUUID()
+    this.activeTurnId = turnId
     const metadata = { correlationId: inputEvent.correlationId, causationId: inputEvent.id }
 
     return this.bus.publish(

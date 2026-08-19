@@ -1,8 +1,8 @@
 // src/SessionHandler.ts
-import { Effect as Effect5 } from "effect";
+import { Effect as Effect10 } from "effect";
 
 // src/Session.ts
-import { Effect as Effect3 } from "effect";
+import { Effect as Effect8 } from "effect";
 
 // src/agent.ts
 import { Effect } from "effect";
@@ -17,15 +17,19 @@ var responseText = (response) => {
   return "[model returned no output]";
 };
 var Agent = class {
-  model;
   constructor(model = {
     complete: (request) => Effect.succeed({
       kind: "completed",
       text: `[stub agent response to: ${request.messages.at(-1)?.content ?? ""}]`
     })
-  }) {
+  }, toolRunner, toolObserver) {
+    this.toolRunner = toolRunner;
+    this.toolObserver = toolObserver;
     this.model = typeof model === "function" ? legacyResponderModel(model) : model;
   }
+  toolRunner;
+  toolObserver;
+  model;
   handleInput(text, history = []) {
     return this.handleInputStreaming(text, history, () => Effect.void);
   }
@@ -33,10 +37,34 @@ var Agent = class {
     const userMessage = { role: "user", content: text };
     const messages = [...history, userMessage];
     const complete = this.model.stream === void 0 ? this.model.complete({ messages }).pipe(
-      Effect.tap((response) => onDelta(responseText(response))),
+      Effect.flatMap((response) => this.resolveResponse(response, messages, onDelta)),
       Effect.map(responseText)
     ) : this.model.stream({ messages }, onDelta).pipe(Effect.map(responseText));
     return complete;
+  }
+  resolveResponse(response, messages, onDelta) {
+    if (response.kind !== "tool-requested") {
+      return onDelta(responseText(response)).pipe(Effect.as(response));
+    }
+    if (this.toolRunner === void 0) return Effect.fail("Tool requests are not configured");
+    const request = response.request;
+    const requested = this.toolObserver?.requested(request) ?? Effect.void;
+    const onFailure = (error) => {
+      const observed = this.toolObserver?.failed(request, error) ?? Effect.void;
+      return observed.pipe(Effect.flatMap(() => Effect.fail(error)));
+    };
+    return requested.pipe(
+      Effect.flatMap(() => this.toolRunner(request)),
+      Effect.tap((responseValue) => this.toolObserver?.completed(request, responseValue) ?? Effect.void),
+      Effect.map((responseValue) => [
+        ...messages,
+        { role: "assistant", content: "", toolCallId: request.requestId, toolName: request.toolName },
+        { role: "tool", content: JSON.stringify(responseValue), toolCallId: request.requestId, toolName: request.toolName }
+      ]),
+      Effect.flatMap((nextMessages) => this.model.complete({ messages: nextMessages })),
+      Effect.tap((next) => onDelta(responseText(next))),
+      Effect.catchAll(onFailure)
+    );
   }
 };
 
@@ -124,13 +152,283 @@ function generateSessionId() {
   return sessionId(uuid);
 }
 
+// src/tools/toolRegister.ts
+import { Effect as Effect7 } from "effect";
+
+// src/tools/codingTools/editFile.ts
+import { Effect as Effect3 } from "effect";
+
+// src/tools/tool.ts
+var Tool = class {
+  constructor(name, description, execute, validate = () => void 0) {
+    this.name = name;
+    this.description = description;
+    this.execute = execute;
+    this.validate = validate;
+  }
+  name;
+  description;
+  execute;
+  validate;
+};
+
+// src/tools/codingTools/editFile.ts
+var editFileTool = new Tool(
+  "edit-file",
+  "Edit a file in the project",
+  (params, context) => Effect3.succeed({
+    status: "stub",
+    message: "File editing is not implemented yet.",
+    params,
+    sessionId: context.sessionId
+  })
+);
+
+// src/tools/codingTools/requestUserInput.ts
+import { Effect as Effect4 } from "effect";
+var requestUserInputTool = new Tool(
+  "request-user-input",
+  "Request input from the user",
+  (params, context) => {
+    const questions = params.questions ?? [];
+    return context.bus.publish(
+      {
+        kind: "UserInputRequested",
+        params: { requestId: context.requestId, questions }
+      },
+      context.publisherId
+    ).pipe(Effect4.as({ status: "waiting-for-user-input" }));
+  }
+);
+
+// src/tools/codingTools/readFile.ts
+import { readFile } from "fs/promises";
+import { Effect as Effect5 } from "effect";
+
+// src/tools/workspace.ts
+import { access, lstat, realpath } from "fs/promises";
+import path from "path";
+var MAX_FILE_BYTES = 1024 * 1024;
+var workspacePath = (workspaceRoot, requestedPath) => {
+  if (typeof requestedPath !== "string" || requestedPath.length === 0) {
+    throw new Error("path must be a non-empty relative path");
+  }
+  if (path.isAbsolute(requestedPath)) throw new Error("absolute paths are not allowed");
+  const root = path.resolve(workspaceRoot || process.cwd());
+  const target = path.resolve(root, requestedPath);
+  if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
+    throw new Error("path is outside the workspace");
+  }
+  return target;
+};
+var assertExistingWorkspacePath = async (workspaceRoot, requestedPath) => {
+  const target = workspacePath(workspaceRoot, requestedPath);
+  await access(target);
+  const [rootReal, targetReal] = await Promise.all([
+    realpath(workspaceRoot || process.cwd()),
+    realpath(target)
+  ]);
+  if (targetReal !== rootReal && !targetReal.startsWith(`${rootReal}${path.sep}`)) {
+    throw new Error("path resolves outside the workspace");
+  }
+  return { target: targetReal, info: await lstat(targetReal) };
+};
+
+// src/tools/codingTools/readFile.ts
+var readFileTool = new Tool(
+  "read-file",
+  "Read a UTF-8 text file within the workspace",
+  (params, context) => Effect5.tryPromise({
+    try: async () => {
+      const { target, info } = await assertExistingWorkspacePath(context.workspaceRoot, params.path);
+      if (!info.isFile()) throw new Error("path is not a file");
+      if (info.size > MAX_FILE_BYTES) throw new Error(`file exceeds ${MAX_FILE_BYTES} byte limit`);
+      return { path: params.path, content: await readFile(target, "utf8") };
+    },
+    catch: (error) => String(error)
+  }),
+  (params) => typeof params?.path === "string" ? void 0 : "invalid arguments: path must be a string"
+);
+
+// src/tools/codingTools/searchWorkspace.ts
+import { readFile as readFile2, readdir } from "fs/promises";
+import path2 from "path";
+import { Effect as Effect6 } from "effect";
+var ignored = /* @__PURE__ */ new Set([".git", "node_modules", "dist", ".next"]);
+var MAX_RESULTS = 100;
+var filesUnder = async (root, relative = "") => {
+  const directory = path2.join(root, relative);
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (ignored.has(entry.name)) continue;
+    const child = path2.join(relative, entry.name);
+    if (entry.isDirectory()) files.push(...await filesUnder(root, child));
+    else if (entry.isFile()) files.push(child);
+  }
+  return files;
+};
+var searchWorkspaceTool = new Tool(
+  "search-workspace",
+  "Find literal text in UTF-8 files within the workspace",
+  (params, context) => Effect6.tryPromise({
+    try: async () => {
+      const input = params;
+      const query = input.query;
+      const relativeRoot = typeof input.path === "string" && input.path.length > 0 ? input.path : ".";
+      const maxResults = typeof input.maxResults === "number" && Number.isInteger(input.maxResults) ? Math.min(input.maxResults, MAX_RESULTS) : 50;
+      const root = workspacePath(context.workspaceRoot, relativeRoot);
+      const results = [];
+      for (const relativeFile of await filesUnder(root)) {
+        if (results.length >= maxResults) break;
+        const absolute = path2.join(root, relativeFile);
+        const content = await readFile2(absolute);
+        if (content.byteLength > MAX_FILE_BYTES || content.includes(0)) continue;
+        const lines = content.toString("utf8").split(/\r?\n/);
+        lines.forEach((line, index) => {
+          if (results.length < maxResults && line.includes(query)) {
+            results.push({ path: path2.relative(context.workspaceRoot || process.cwd(), absolute), lineNumber: index + 1, line });
+          }
+        });
+      }
+      return { query, results, truncated: results.length >= maxResults };
+    },
+    catch: (error) => String(error)
+  }),
+  (params) => {
+    const input = params;
+    if (typeof input?.query !== "string" || input.query.length === 0) return "invalid arguments: query must be a non-empty string";
+    if (input.query.length > 200) return "invalid arguments: query is too long";
+    if (input.maxResults !== void 0 && (!Number.isInteger(input.maxResults) || input.maxResults < 1)) return "invalid arguments: maxResults must be a positive integer";
+    return void 0;
+  }
+);
+
+// src/tools/toolRegister.ts
+var ToolRegistry = class {
+  tools = /* @__PURE__ */ new Map();
+  init() {
+    this.register(editFileTool);
+    this.register(requestUserInputTool);
+    this.register(readFileTool);
+    this.register(searchWorkspaceTool);
+    Effect7.runFork(
+      eventBus.subscribe("ToolRequested", (event) => {
+        const tool = this.tools.get(event.params.toolName);
+        if (tool === void 0 || event.sessionId === void 0) {
+          const error = tool === void 0 ? `Unknown tool: ${event.params.toolName}` : "Tool requests must belong to a session";
+          const options = event.sessionId === void 0 ? { correlationId: event.correlationId, causationId: event.id } : {
+            sessionId: event.sessionId,
+            correlationId: event.correlationId,
+            causationId: event.id
+          };
+          Effect7.runFork(eventBus.publish(
+            {
+              kind: "ToolExecutionFailed",
+              params: {
+                requestId: event.params.requestId,
+                toolName: event.params.toolName,
+                error
+              }
+            },
+            event.publisherId,
+            options
+          ).pipe(Effect7.asVoid));
+          return;
+        }
+        const sessionBus = new SessionBus(event.sessionId, eventBus);
+        const context = {
+          sessionId: event.sessionId,
+          requestId: event.params.requestId,
+          workspaceRoot: process.cwd(),
+          publisherId: event.publisherId,
+          bus: sessionBus
+        };
+        Effect7.runFork(
+          tool.execute(event.params.params, context).pipe(
+            Effect7.flatMap((response) => eventBus.publish(
+              {
+                kind: "ToolExecutionCompleted",
+                params: {
+                  requestId: event.params.requestId,
+                  toolName: event.params.toolName,
+                  response
+                }
+              },
+              event.publisherId,
+              {
+                sessionId: event.sessionId,
+                correlationId: event.correlationId,
+                causationId: event.id
+              }
+            )),
+            Effect7.catchAll((error) => eventBus.publish(
+              {
+                kind: "ToolExecutionFailed",
+                params: {
+                  requestId: event.params.requestId,
+                  toolName: event.params.toolName,
+                  error: String(error)
+                }
+              },
+              event.publisherId,
+              {
+                sessionId: event.sessionId,
+                correlationId: event.correlationId,
+                causationId: event.id
+              }
+            )),
+            Effect7.asVoid
+          )
+        );
+      })
+    );
+    return this;
+  }
+  register(tool) {
+    this.tools.set(tool.name, tool);
+  }
+  get(toolName) {
+    return this.tools.get(toolName);
+  }
+  execute(request, context) {
+    const tool = this.tools.get(request.toolName);
+    if (tool === void 0) return Effect7.fail(`Unknown tool: ${request.toolName}`);
+    const validationError = tool.validate(request.params);
+    if (validationError !== void 0) return Effect7.fail(validationError);
+    return tool.execute(request.params, context);
+  }
+};
+var toolRegistry = new ToolRegistry().init();
+
 // src/Session.ts
 var Session = class {
   constructor(workspaceRoot, creator, model) {
     this.workspaceRoot = workspaceRoot;
     this.creator = creator;
-    void this.workspaceRoot;
-    this.agent = new Agent(model);
+    this.agent = new Agent(model, (request) => {
+      const requestId = request.requestId;
+      return toolRegistry.execute(request, {
+        sessionId: this.sessionId,
+        requestId,
+        workspaceRoot: this.workspaceRoot || process.cwd(),
+        publisherId: this.creator,
+        bus: this.bus
+      });
+    }, {
+      requested: (request) => this.bus.publish({
+        kind: "ToolRequested",
+        params: { requestId: request.requestId, turnId: this.activeTurnId, toolName: request.toolName, params: request.params }
+      }, this.creator).pipe(Effect8.asVoid),
+      completed: (request, response) => this.bus.publish({
+        kind: "ToolExecutionCompleted",
+        params: { requestId: request.requestId, toolName: request.toolName, response }
+      }, this.creator).pipe(Effect8.asVoid),
+      failed: (request, error) => this.bus.publish({
+        kind: "ToolExecutionFailed",
+        params: { requestId: request.requestId, toolName: request.toolName, error: String(error) }
+      }, this.creator).pipe(Effect8.asVoid)
+    });
   }
   workspaceRoot;
   creator;
@@ -138,52 +436,54 @@ var Session = class {
   bus = new SessionBus(this.sessionId, eventBus);
   agent;
   history = [];
+  activeTurnId = "";
   init() {
-    Effect3.runFork(this.bus.publish(
+    Effect8.runFork(this.bus.publish(
       { kind: "SessionStarted", params: { sessionId: this.sessionId } },
       this.creator
-    ).pipe(Effect3.asVoid));
-    Effect3.runFork(
+    ).pipe(Effect8.asVoid));
+    Effect8.runFork(
       this.bus.subscribe("UserInputReceived", (event) => {
-        Effect3.runFork(this.handleInput(event.params.text, event));
+        Effect8.runFork(this.handleInput(event.params.text, event));
       })
     );
   }
   handleInput(text, inputEvent) {
     const turnId = crypto.randomUUID();
+    this.activeTurnId = turnId;
     const metadata = { correlationId: inputEvent.correlationId, causationId: inputEvent.id };
     return this.bus.publish(
       { kind: "AgentTurnStarted", params: { turnId } },
       this.creator,
       metadata
     ).pipe(
-      Effect3.flatMap((turnStarted) => this.agent.handleInputStreaming(
+      Effect8.flatMap((turnStarted) => this.agent.handleInputStreaming(
         text,
         this.history,
         (delta) => this.bus.publish(
           { kind: "AgentOutputDelta", params: { turnId, text: delta } },
           this.creator,
           { correlationId: inputEvent.correlationId, causationId: turnStarted.id }
-        ).pipe(Effect3.asVoid)
+        ).pipe(Effect8.asVoid)
       ).pipe(
-        Effect3.tap((response) => {
+        Effect8.tap((response) => {
           this.history.push({ role: "user", content: text }, { role: "assistant", content: response });
         }),
-        Effect3.flatMap((output) => this.bus.publish(
+        Effect8.flatMap((output) => this.bus.publish(
           { kind: "AgentTurnFinished", params: { turnId } },
           this.creator,
           { correlationId: inputEvent.correlationId, causationId: output.id }
-        ).pipe(Effect3.asVoid))
+        ).pipe(Effect8.asVoid))
       )),
-      Effect3.catchAll((error) => this.bus.publish(
+      Effect8.catchAll((error) => this.bus.publish(
         {
           kind: "AgentTurnFailed",
           params: { turnId, error: String(error) }
         },
         this.creator,
         { correlationId: inputEvent.correlationId, causationId: inputEvent.id }
-      ).pipe(Effect3.asVoid)),
-      Effect3.asVoid
+      ).pipe(Effect8.asVoid)),
+      Effect8.asVoid
     );
   }
   close(reason) {
@@ -191,18 +491,18 @@ var Session = class {
       { kind: "SessionClosed", params: { reason } },
       this.creator
     ).pipe(
-      Effect3.flatMap((closed) => this.bus.publish(
+      Effect8.flatMap((closed) => this.bus.publish(
         { kind: "SessionFinished", params: { sessionId: this.sessionId, reason: "closed" } },
         this.creator,
         { causationId: closed.id }
       )),
-      Effect3.asVoid
+      Effect8.asVoid
     );
   }
 };
 
 // src/llmAdapters/openRouter.tsx
-import { Data, Effect as Effect4 } from "effect";
+import { Data, Effect as Effect9 } from "effect";
 
 // src/modelSelector.ts
 var modelSelector = () => process.env.OPENROUTER_MODEL ?? "openrouter/free";
@@ -223,7 +523,7 @@ var parseResponse = (body) => {
   return { kind: "completed", text: choice.content };
 };
 var createOpenRouterModel = (options = {}) => {
-  const call = (messages, body, onResponse) => Effect4.tryPromise({
+  const call = (messages, body, onResponse) => Effect9.tryPromise({
     try: async () => {
       const apiKey = options.apiKey ?? process.env.OPENROUTER_KEY;
       if (!apiKey) throw new OpenRouterError({ message: "OPENROUTER_KEY is not configured", cause: void 0 });
@@ -271,7 +571,7 @@ var createOpenRouterModel = (options = {}) => {
         if (typeof delta?.refusal === "string") refusal += delta.refusal;
         if (typeof delta?.content === "string" && delta.content.length > 0) {
           text += delta.content;
-          await Effect4.runPromise(onDelta(delta.content));
+          await Effect9.runPromise(onDelta(delta.content));
         }
       };
       while (true) {
@@ -293,10 +593,10 @@ var createOpenRouterModel = (options = {}) => {
 var SessionManager = class {
   sessions = /* @__PURE__ */ new Map();
   init() {
-    Effect5.runFork(
+    Effect10.runFork(
       eventBus.subscribe("SessionCreateRequested", (event) => {
         const session = this.createSession(event.params.workspace ?? "", event.publisherId);
-        Effect5.runFork(eventBus.publish(
+        Effect10.runFork(eventBus.publish(
           { kind: "SessionCreateSuccessful", params: { sessionId: session.sessionId } },
           event.publisherId,
           { correlationId: event.correlationId, causationId: event.id }
@@ -321,146 +621,12 @@ var SessionManager = class {
 };
 var sessionManager = new SessionManager().init();
 
-// src/tools/toolRegister.ts
-import { Effect as Effect8 } from "effect";
-
-// src/tools/codingTools/editFile.ts
-import { Effect as Effect6 } from "effect";
-
-// src/tools/tool.ts
-var Tool = class {
-  constructor(name, description, execute) {
-    this.name = name;
-    this.description = description;
-    this.execute = execute;
-  }
-  name;
-  description;
-  execute;
-};
-
-// src/tools/codingTools/editFile.ts
-var editFileTool = new Tool(
-  "edit-file",
-  "Edit a file in the project",
-  (params, context) => Effect6.succeed({
-    status: "stub",
-    message: "File editing is not implemented yet.",
-    params,
-    sessionId: context.sessionId
-  })
-);
-
-// src/tools/codingTools/requestUserInput.ts
-import { Effect as Effect7 } from "effect";
-var requestUserInputTool = new Tool(
-  "request-user-input",
-  "Request input from the user",
-  (params, context) => {
-    const questions = params.questions ?? [];
-    return context.bus.publish(
-      {
-        kind: "UserInputRequested",
-        params: { requestId: context.requestId, questions }
-      },
-      context.publisherId
-    ).pipe(Effect7.as({ status: "waiting-for-user-input" }));
-  }
-);
-
-// src/tools/toolRegister.ts
-var ToolRegistry = class {
-  tools = /* @__PURE__ */ new Map();
-  init() {
-    this.register(editFileTool);
-    this.register(requestUserInputTool);
-    Effect8.runFork(
-      eventBus.subscribe("ToolRequested", (event) => {
-        const tool = this.tools.get(event.params.toolName);
-        if (tool === void 0 || event.sessionId === void 0) {
-          const error = tool === void 0 ? `Unknown tool: ${event.params.toolName}` : "Tool requests must belong to a session";
-          const options = event.sessionId === void 0 ? { correlationId: event.correlationId, causationId: event.id } : {
-            sessionId: event.sessionId,
-            correlationId: event.correlationId,
-            causationId: event.id
-          };
-          Effect8.runFork(eventBus.publish(
-            {
-              kind: "ToolExecutionFailed",
-              params: {
-                requestId: event.params.requestId,
-                toolName: event.params.toolName,
-                error
-              }
-            },
-            event.publisherId,
-            options
-          ).pipe(Effect8.asVoid));
-          return;
-        }
-        const sessionBus = new SessionBus(event.sessionId, eventBus);
-        const context = {
-          sessionId: event.sessionId,
-          requestId: event.params.requestId,
-          publisherId: event.publisherId,
-          bus: sessionBus
-        };
-        Effect8.runFork(
-          tool.execute(event.params.params, context).pipe(
-            Effect8.flatMap((response) => eventBus.publish(
-              {
-                kind: "ToolExecutionCompleted",
-                params: {
-                  requestId: event.params.requestId,
-                  toolName: event.params.toolName,
-                  response
-                }
-              },
-              event.publisherId,
-              {
-                sessionId: event.sessionId,
-                correlationId: event.correlationId,
-                causationId: event.id
-              }
-            )),
-            Effect8.catchAll((error) => eventBus.publish(
-              {
-                kind: "ToolExecutionFailed",
-                params: {
-                  requestId: event.params.requestId,
-                  toolName: event.params.toolName,
-                  error: String(error)
-                }
-              },
-              event.publisherId,
-              {
-                sessionId: event.sessionId,
-                correlationId: event.correlationId,
-                causationId: event.id
-              }
-            )),
-            Effect8.asVoid
-          )
-        );
-      })
-    );
-    return this;
-  }
-  register(tool) {
-    this.tools.set(tool.name, tool);
-  }
-  get(toolName) {
-    return this.tools.get(toolName);
-  }
-};
-var toolRegistry = new ToolRegistry().init();
-
 // src/cli.ts
 import { createInterface } from "readline";
-import { Effect as Effect10 } from "effect";
+import { Effect as Effect12 } from "effect";
 
 // src/User.ts
-import { Effect as Effect9 } from "effect";
+import { Effect as Effect11 } from "effect";
 
 // src/publisherId.ts
 import { Brand as Brand2 } from "effect";
@@ -475,9 +641,9 @@ var Client = class {
   constructor(coreBus = eventBus, publisherId = generatePublisherId()) {
     this.coreBus = coreBus;
     this.publisherId = publisherId;
-    Effect9.runFork(this.coreBus.subscribeAll((event) => {
+    Effect11.runFork(this.coreBus.subscribeAll((event) => {
       if (event.sessionId !== void 0) {
-        Effect9.runFork(this.events.publishAny(event));
+        Effect11.runFork(this.events.publishAny(event));
       }
       if (event.kind === "SessionCreateSuccessful") {
         this.pending.get(event.correlationId)?.(event.params.sessionId);
@@ -492,7 +658,7 @@ var Client = class {
   createSession(prompt, workspace = "") {
     const correlationId = crypto.randomUUID();
     const created = new Promise((resolve) => this.pending.set(correlationId, resolve));
-    Effect9.runFork(this.coreBus.publish(
+    Effect11.runFork(this.coreBus.publish(
       { kind: "SessionCreateRequested", params: { prompt, mode: "ask", workspace } },
       this.publisherId,
       { correlationId }
@@ -500,14 +666,14 @@ var Client = class {
     return created;
   }
   sendInput(sessionId, text) {
-    Effect9.runFork(this.coreBus.publish(
+    Effect11.runFork(this.coreBus.publish(
       { kind: "UserInputReceived", params: { text } },
       this.publisherId,
       { sessionId }
     ));
   }
   subscribeToSession(sessionId, handler) {
-    Effect9.runFork(this.events.subscribeToSession(sessionId, handler));
+    Effect11.runFork(this.events.subscribeToSession(sessionId, handler));
   }
 };
 
@@ -523,7 +689,7 @@ var formatDebugEvent = (event) => JSON.stringify({
 });
 async function runCli(input = process.stdin, output = process.stdout, client = new Client(), options = {}) {
   if (options.verbose) {
-    Effect10.runFork(eventBus.subscribeAll((event) => {
+    Effect12.runFork(eventBus.subscribeAll((event) => {
       process.stderr.write(`[bus] ${new Date(event.timestamp).toISOString()} ${formatDebugEvent(event)}
 `);
     }));
